@@ -167,7 +167,8 @@ class TestYuanrongStorageE2E:
 
         # Put & Verify Meta
         meta = client.put(keys, vals)
-        assert all(m == "KVClient" for m in meta)
+        # b"\x01" is a tag added by YuanrongStorageClient, indicating that it is processed via General KV path.
+        assert all(m == b"\x02" for m in meta)
 
         # Get & Verify Values
         ret = client.get(keys, shp, dt, meta)
@@ -186,7 +187,8 @@ class TestYuanrongStorageE2E:
         client = self.client_cls(config)
 
         meta = client.put(keys, vals)
-        assert all(m == "DsTensorClient" for m in meta)
+        # b"\x01" is a tag added by YuanrongStorageClient, indicating that it is processed via NPU path.
+        assert all(m == b"\x01" for m in meta)
 
         ret = client.get(keys, shp, dt, meta)
         for o, r in zip(vals, ret, strict=True):
@@ -199,7 +201,7 @@ class TestYuanrongStorageE2E:
         client = self.client_cls(config)
 
         meta = client.put(keys, vals)
-        assert set(meta) == {"DsTensorClient", "KVClient"}
+        assert set(meta) == {b"\x01", b"\x02"}
 
         ret = client.get(keys, shp, dt, meta)
         for o, r in zip(vals, ret, strict=True):
