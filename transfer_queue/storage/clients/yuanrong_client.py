@@ -45,7 +45,7 @@ class StorageStrategy(ABC):
 
     @staticmethod
     @abstractmethod
-    def init(config: dict) -> Union["StorageStrategy", None]:
+    def init(config: dict) -> Optional["StorageStrategy"]:
         """Initialize strategy from config; return None if not applicable."""
 
     @abstractmethod
@@ -115,10 +115,8 @@ class DsTensorClientAdapter(StorageStrategy):
         """Supports contiguous NPU tensors only."""
         if not (isinstance(value, torch.Tensor) and value.device.type == "npu"):
             return False
-        # Todo(dpj): perhaps KVClient can process uncontiguous tensor
-        if not value.is_contiguous():
-            raise ValueError(f"NPU Tensor is not contiguous: {value}")
-        return True
+        # Only contiguous NPU tensors are supported by this adapter.
+        return value.is_contiguous()
 
     def put(self, keys: list[str], values: list[Any]):
         """Store NPU tensors in batches; deletes before overwrite."""
@@ -150,10 +148,7 @@ class DsTensorClientAdapter(StorageStrategy):
 
             batch_values = self._create_empty_npu_tensorlist(batch_shapes, batch_dtypes)
             self._ds_client.dev_mget(batch_keys, batch_values)
-            # Todo(dpj): should we check failed keys?
-            # failed_keys = self._ds_client.dev_mget(batch_keys, batch_values)
-            # if failed_keys:
-            #     logging.warning(f"YuanrongStorageClient: Querying keys using 'DsTensorClient' failed: {failed_keys}")
+            # Todo(dpj): consider checking and logging keys that fail during dev_mget
             results.extend(batch_values)
         return results
 
@@ -212,7 +207,7 @@ class KVClientAdapter(StorageStrategy):
         logger.info("YuanrongStorageClient: Create KVClient to connect with yuanrong-datasystem backend!")
 
     @staticmethod
-    def init(config: dict) -> Union["StorageStrategy", None]:
+    def init(config: dict) -> Optional["StorageStrategy"]:
         """Always enabled for general objects."""
         return KVClientAdapter(config)
 
@@ -374,7 +369,7 @@ class YuanrongStorageClient(TransferQueueStorageKVClient):
         if not self._strategies:
             raise RuntimeError("No storage strategy available for YuanrongStorageClient")
 
-    def put(self, keys: list[str], values: list[Any]) -> list[str]:
+    def put(self, keys: list[str], values: list[Any]) -> Optional[list[Any]]:
         """Stores multiple key-value pairs to remote storage.
 
         Automatically routes NPU tensors to high-performance tensor storage,
@@ -385,7 +380,7 @@ class YuanrongStorageClient(TransferQueueStorageKVClient):
             values (List[Any]): List of values to store (tensors, scalars, dicts, etc.).
 
         Returns:
-            List[str]: custom metadata of YuanrongStorageCilent in the same order as input keys.
+            List[str]: custom metadata of YuanrongStorageClient in the same order as input keys.
         """
         if not isinstance(keys, list) or not isinstance(values, list):
             raise ValueError("keys and values must be lists")
@@ -492,7 +487,10 @@ class YuanrongStorageClient(TransferQueueStorageKVClient):
                     routed_indexes[strategy].append(i)
                     break
             else:
-                raise ValueError(f"No strategy supports item: {item}")
+                raise ValueError(
+                    f"No strategy supports item of type {type(item).__name__}: {item}. "
+                    f"Available strategies: {[type(s).__name__ for s in self._strategies]}"
+                )
         return routed_indexes
 
     @staticmethod
@@ -520,7 +518,10 @@ class YuanrongStorageClient(TransferQueueStorageKVClient):
             return [task_function(*active_tasks[0])]
 
         # Parallel path: overlap NPU and CPU operations
-        with ThreadPoolExecutor(max_workers=len(active_tasks)) as executor:
+        # Cap the number of worker threads to avoid resource exhaustion if many
+        # strategies are added in the future.
+        max_workers = min(len(active_tasks), 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # futures' results are from task_function
             futures = [executor.submit(task_function, strategy, indexes) for strategy, indexes in active_tasks]
             return [f.result() for f in futures]
