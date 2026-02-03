@@ -391,17 +391,17 @@ class YuanrongStorageClient(TransferQueueStorageKVClient):
 
         routed_indexes = self._route_to_strategies(values, lambda strategy_, item_: strategy_.supports_put(item_))
 
-        # Define the work unit: Slicing the input list and calling the backend strategy.
+        # Define the 'put_task': Slicing the input list and calling the backend strategy.
         # The closure captures local 'keys' and 'values' for zero-overhead parameter passing.
         def put_task(strategy, indexes):
             strategy.put([keys[i] for i in indexes], [values[i] for i in indexes])
             return strategy.strategy_tag(), indexes
 
-        # Dispatch tasks and map metadata back to original positions
+        # Dispatch tasks and map strategy_tag back to original positions
         strategy_tags: list[str] = [""] * len(keys)
         for tag, indexes in self._dispatch_tasks(routed_indexes, put_task):
-            for i in indexes:
-                strategy_tags[i] = tag
+            for original_index in indexes:
+                strategy_tags[original_index] = tag
         return strategy_tags
 
     def get(self, keys: list[str], shapes=None, dtypes=None, custom_backend_meta=None) -> list[Any]:
@@ -429,7 +429,7 @@ class YuanrongStorageClient(TransferQueueStorageKVClient):
             strategy_tags, lambda strategy_, item_: strategy_.supports_get(item_)
         )
 
-        # Work unit for 'get': handles slicing of keys, shapes, and dtypes simultaneously.
+        # Define the 'get_task': handles slicing of keys, shapes, and dtypes simultaneously.
         def get_task(strategy, indexes):
             res = strategy.get(
                 [keys[i] for i in indexes], shapes=[shapes[i] for i in indexes], dtypes=[dtypes[i] for i in indexes]
