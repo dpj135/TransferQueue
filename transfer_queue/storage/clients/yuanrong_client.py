@@ -76,7 +76,9 @@ class StorageStrategy(ABC):
 
 
 class NPUTensorKVClientAdapter(StorageStrategy):
-    """Adapter for YuanRong's high-performance NPU tensor storage."""
+    """Adapter for YuanRong's high-performance NPU tensor storage.
+    Using yr.datasystem.DsTensorClient to connect datasystem backends.
+    """
 
     KEYS_LIMIT: int = 10_000
 
@@ -179,8 +181,8 @@ class NPUTensorKVClientAdapter(StorageStrategy):
 
 
 class GeneralKVClientAdapter(StorageStrategy):
-    """
-    Adapter for general-purpose KV storage with serialization.
+    """Adapter for general-purpose KV storage with serialization.
+    Using yr.datasystem.KVClient to connect datasystem backends.
     The serialization method uses '_decoder' and '_encoder' from 'transfer_queue.utils.serial_utils'.
     """
 
