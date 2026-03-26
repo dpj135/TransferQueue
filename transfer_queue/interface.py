@@ -16,7 +16,10 @@
 import logging
 import math
 import os
+import shutil
+import socket
 import subprocess
+import tempfile
 import time
 from importlib import resources
 from typing import Any, Optional
@@ -102,11 +105,11 @@ def _maybe_create_transferqueue_storage(conf: DictConfig) -> DictConfig:
                 check = subprocess.run(["pgrep", "-f", "mooncake_master"], stdout=subprocess.PIPE, text=True)
                 if check.returncode == 0:
                     pids = check.stdout.strip().replace("\n", ", ")
-                    logging.info(f"Find existing mooncake_master (PID: {pids}), try to kill first...")
+                    logger.info(f"Find existing mooncake_master (PID: {pids}), try to kill first...")
 
                     result = os.system('pkill -f "[m]ooncake_master"')
                     if result == 0:
-                        logging.info("Successfully killed existing mooncake_master processes.")
+                        logger.info("Successfully killed existing mooncake_master processes.")
                     else:
                         raise RuntimeError(f"Failed to kill existing mooncake_master processes (exit code: {result}).")
 
@@ -167,6 +170,193 @@ def _maybe_create_transferqueue_storage(conf: DictConfig) -> DictConfig:
                         f"Output:\n{error_msg}"
                     )
                 _TRANSFER_QUEUE_STORAGE["MooncakeStore"] = process
+        if conf.backend.storage_backend == "Yuanrong":
+            if conf.backend.Yuanrong.auto_init:
+                etcd_process = None
+                etcd_data_dir = None
+
+                try:
+                    # ========== Start etcd (inlined from _start_etcd) ==========
+                    etcd_address = conf.backend.Yuanrong.etcd_address
+                    # Parse host and port
+                    if "://" in etcd_address:
+                        # Remove protocol prefix if present
+                        parsed = urlparse(etcd_address)
+                        host = parsed.hostname
+                        port = parsed.port
+                    else:
+                        # Assume host:port format
+                        parts = etcd_address.split(":")
+                        if len(parts) != 2:
+                            raise ValueError(f"Invalid etcd_address format: {etcd_address}. Expected host:port")
+                        host = parts[0]
+                        port = int(parts[1])
+
+                    # Check if etcd is already running
+                    check = subprocess.run(["pgrep", "-f", "etcd"], stdout=subprocess.PIPE, text=True)
+                    if check.returncode == 0:
+                        pids = check.stdout.strip().replace("\n", ", ")
+                        logger.warning(f"Found existing etcd processes (PID: {pids}). TQ will not start a new one.")
+                        # Try to connect to see if it's listening on our desired port
+                        try:
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(2)
+                            result = sock.connect_ex((host, port))
+                            sock.close()
+                            if result == 0:
+                                logger.info(f"etcd is already listening on {host}:{port}")
+                                etcd_process = None
+                                etcd_data_dir = None
+                            else:
+                                logger.warning(
+                                    f"etcd process exists but not listening on {host}:{port}, will start new instance"
+                                )
+                                # Continue to start new instance
+                        except Exception as e:
+                            logger.warning(f"Failed to check etcd port: {e}, will start new instance")
+                            # Continue to start new instance
+
+                    if etcd_process is None:
+                        # Create temporary data directory
+                        etcd_data_dir = tempfile.mkdtemp(prefix="tq_etcd_")
+                        logger.info(f"Starting etcd with data directory: {etcd_data_dir}")
+
+                        cmd = [
+                            "etcd",
+                            f"--data-dir={etcd_data_dir}",
+                            f"--listen-client-urls=http://0.0.0.0:{port}",
+                            f"--advertise-client-urls=http://{host}:{port}",
+                            "--listen-peer-urls=http://0.0.0.0:2380",
+                            f"--initial-advertise-peer-urls=http://{host}:2380",
+                            "--initial-cluster=default=http://{}:2380".format(host),
+                        ]
+
+                        log_file_path = "/tmp/etcd.log"
+                        with open(log_file_path, "w") as log_file:
+                            etcd_process = subprocess.Popen(
+                                cmd,
+                                stdout=log_file,
+                                stderr=subprocess.STDOUT,
+                                text=True,
+                                bufsize=1,
+                                universal_newlines=True,
+                                start_new_session=True,
+                            )
+                            time.sleep(3)  # Wait for etcd to start
+
+                        if etcd_process.poll() is None:
+                            logger.info(
+                                f"etcd started, PID: {etcd_process.pid}. Logs at: {os.path.abspath(log_file_path)}"
+                            )
+                        else:
+                            error_msg = ""
+                            try:
+                                with open(log_file_path) as f:
+                                    error_msg = f.read()
+                            except Exception as e:
+                                error_msg = f"Failed to read log file: {e}"
+
+                            # Clean up data directory on failure
+                            try:
+                                shutil.rmtree(etcd_data_dir, ignore_errors=True)
+                            except Exception:
+                                pass
+
+                            raise RuntimeError(
+                                f"etcd exited with error. Check {log_file_path} for detailed logs. Output:\n{error_msg}"
+                            )
+
+                    # Wait a moment for etcd to be ready if we started it
+                    if etcd_process is not None:
+                        time.sleep(2)
+
+                    # ========== Start datasystem worker (inlined from _start_dscli) ==========
+                    worker_address = conf.backend.Yuanrong.worker_address
+                    # Check if datasystem worker is already running (by checking worker port)
+                    parts = worker_address.split(":")
+                    if len(parts) != 2:
+                        raise ValueError(f"Invalid worker_address format: {worker_address}. Expected host:port")
+                    worker_host = parts[0]
+                    worker_port = int(parts[1])
+
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(2)
+                        result = sock.connect_ex((worker_host, worker_port))
+                        sock.close()
+                        if result == 0:
+                            logger.info(f"Datasystem worker already listening on {worker_address}")
+                        else:
+                            # Start datasystem worker
+                            cmd = [
+                                "dscli",
+                                "start",
+                                "-w",
+                                f"--worker_address={worker_address}",
+                                f"--etcd_address={etcd_address}",
+                            ]
+
+                            log_file_path = "/tmp/dscli.log"
+                            with open(log_file_path, "w") as log_file:
+                                process = subprocess.Popen(
+                                    cmd,
+                                    stdout=log_file,
+                                    stderr=subprocess.STDOUT,
+                                    text=True,
+                                    bufsize=1,
+                                    universal_newlines=True,
+                                    start_new_session=True,
+                                )
+                                # Wait for dscli to start and exit (it starts worker and exits)
+                                time.sleep(3)
+
+                            if process.poll() is not None:
+                                # dscli exited, check if it succeeded by verifying port
+                                time.sleep(2)  # Give worker time to start
+                                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                sock.settimeout(2)
+                                result = sock.connect_ex((worker_host, worker_port))
+                                sock.close()
+                                if result != 0:
+                                    error_msg = ""
+                                    try:
+                                        with open(log_file_path) as f:
+                                            error_msg = f.read()
+                                    except Exception as e:
+                                        error_msg = f"Failed to read log file: {e}"
+                                    raise RuntimeError(
+                                        f"Failed to start datasystem worker. Check {log_file_path} for logs. "
+                                        f"Output:\n{error_msg}"
+                                    )
+                                else:
+                                    logger.info(f"Datasystem worker started and listening on {worker_address}")
+                            else:
+                                # dscli is still running (unexpected), log warning
+                                logger.warning(
+                                    f"dscli process still running (PID: {process.pid}). This may indicate an issue."
+                                )
+                    except Exception as e:
+                        raise RuntimeError(f"Failed to start datasystem worker: {e}") from e
+
+                    # Store processes and data directory
+                    _TRANSFER_QUEUE_STORAGE["Yuanrong"] = {
+                        "etcd": etcd_process,
+                        "etcd_data_dir": etcd_data_dir,
+                        "worker_address": worker_address,
+                        "etcd_address": etcd_address,
+                    }
+                    logger.info("Yuanrong backend (etcd + datasystem) started successfully.")
+
+                except Exception as e:
+                    # Clean up on failure
+                    if etcd_process is not None and etcd_process.poll() is None:
+                        etcd_process.terminate()
+                    if etcd_data_dir is not None:
+                        try:
+                            shutil.rmtree(etcd_data_dir, ignore_errors=True)
+                        except Exception:
+                            pass
+                    raise RuntimeError(f"Failed to start Yuanrong backend: {e}") from e
     return conf
 
 
@@ -328,6 +518,42 @@ def close():
                                 logger.info("Successfully removed all existing keys in mooncake_master.")
                         except Exception:
                             pass
+                elif key == "Yuanrong":
+                    # Stop etcd process and clean up data directory, stop datasystem worker via dscli
+                    if isinstance(value, dict):
+                        etcd_process = value.get("etcd")
+                        etcd_data_dir = value.get("etcd_data_dir")
+                        worker_address = value.get("worker_address")
+
+                        # Stop etcd if running
+                        if etcd_process is not None and etcd_process.poll() is None:
+                            etcd_process.terminate()
+                            try:
+                                etcd_process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                etcd_process.kill()
+
+                        # Clean up etcd data directory
+                        if etcd_data_dir is not None and os.path.exists(etcd_data_dir):
+                            try:
+                                shutil.rmtree(etcd_data_dir, ignore_errors=True)
+                                logger.info(f"Cleaned up etcd data directory: {etcd_data_dir}")
+                            except Exception as e:
+                                logger.warning(f"Failed to clean up etcd data directory {etcd_data_dir}: {e}")
+
+                        # Stop datasystem worker via dscli command
+                        if worker_address:
+                            try:
+                                subprocess.run(
+                                    ["dscli", "stop", "--worker_address", worker_address],
+                                    timeout=5,
+                                    capture_output=True,
+                                )
+                                logger.info(f"Stopped datasystem worker at {worker_address} via dscli stop")
+                            except Exception as e:
+                                logger.warning(f"Failed to stop datasystem worker via dscli: {e}")
+                    else:
+                        logger.warning(f"Unexpected Yuanrong storage value: {value}")
                 else:
                     logger.warning(f"close for _TRANSFER_QUEUE_STORAGE with key {key} is not supported for now.")
 
