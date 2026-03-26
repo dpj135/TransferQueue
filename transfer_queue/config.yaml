@@ -48,7 +48,14 @@ backend:
 
   # For Yuanrong:
   Yuanrong:
-    # Port of local yuanrong datasystem worker
+    # Whether to let TQ automatically start etcd and datasystem services (default false)
+    auto_init: false
+    # etcd service address (used to start etcd when auto_init=true)
+    etcd_address: "127.0.0.1:2379"
+    # datasystem worker address (used to start dscli when auto_init=true)
+    worker_address: "127.0.0.1:31501"
+    # YuanrongStorageClient connection parameters (required)
+    host: "127.0.0.1"
     port: 31501
-    # If enable npu transport
-    enable_yr_npu_transport: false
+    # Client name (optional, default is YuanrongStorageClient)
+    client_name: "YuanrongStorageClient"
