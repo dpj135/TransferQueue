@@ -48,12 +48,11 @@ backend:
 
   # For Yuanrong:
   Yuanrong:
-    # Whether to let TQ automatically start etcd and datasystem services (default false)
-    auto_init: false
+    # Whether to let TQ automatically start etcd and datasystem services
+    auto_init: True
     # etcd service address (used to start etcd when auto_init=true)
     etcd_address: "127.0.0.1:2379"
-    # datasystem worker address (used to start dscli when auto_init=true)
-    worker_address: "127.0.0.1:31501"
+    # datasystem worker host and port (used to start dscli when auto_init=true)
     # YuanrongStorageClient connection parameters (required)
     host: "127.0.0.1"
     port: 31501
