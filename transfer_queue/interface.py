@@ -300,6 +300,11 @@ def _maybe_create_transferqueue_storage(conf: DictConfig) -> DictConfig:
                     # Clean up on failure
                     if etcd_process is not None and etcd_process.poll() is None:
                         etcd_process.terminate()
+                        try:
+                            etcd_process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            etcd_process.kill()
+                            etcd_process.wait()
                     if etcd_data_dir is not None:
                         try:
                             shutil.rmtree(etcd_data_dir, ignore_errors=True)
@@ -481,6 +486,7 @@ def close():
                                 etcd_process.wait(timeout=5)
                             except subprocess.TimeoutExpired:
                                 etcd_process.kill()
+                                etcd_process.wait()
 
                         # Clean up etcd data directory
                         if etcd_data_dir is not None and os.path.exists(etcd_data_dir):
@@ -493,12 +499,21 @@ def close():
                         # Stop datasystem worker via dscli command
                         if worker_address:
                             try:
-                                subprocess.run(
+                                result = subprocess.run(
                                     ["dscli", "stop", "--worker_address", worker_address],
                                     timeout=90,
                                     capture_output=True,
                                 )
-                                logger.info(f"Stopped datasystem worker at {worker_address} via dscli stop")
+                                if result.returncode == 0:
+                                    logger.info(f"Stopped datasystem worker at {worker_address} via dscli stop")
+                                else:
+                                    error_msg = (result.stderr or result.stdout or b"").decode()
+                                    logger.warning(
+                                        f"Failed to stop datasystem worker at {worker_address}. "
+                                        f"Return code: {result.returncode}, Error: {error_msg}"
+                                    )
+                            except subprocess.TimeoutExpired as err:
+                                logger.warning(f"dscli stop timed out for {worker_address}: {err}")
                             except Exception as e:
                                 logger.warning(f"Failed to stop datasystem worker via dscli: {e}")
                     else:

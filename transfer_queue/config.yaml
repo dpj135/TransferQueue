@@ -53,8 +53,5 @@ backend:
     # etcd service address (used to start etcd when auto_init=true)
     etcd_address: "127.0.0.1:2379"
     # datasystem worker host and port (used to start dscli when auto_init=true)
-    # YuanrongStorageClient connection parameters (required)
     host: "127.0.0.1"
     port: 31501
-    # Client name (optional, default is YuanrongStorageClient)
-    client_name: "YuanrongStorageClient"
