@@ -585,7 +585,7 @@ class YuanrongStorageClient(TransferQueueStorageKVClient):
 
         strategy_tags = custom_backend_meta
         routed_indexes = self._route_to_strategies(
-            strategy_tags, lambda strategy_, item_: strategy_.supports_clear(item_)
+            strategy_tags, lambda strategy_, item_: strategy_.supports_clear(item_), failback=True
         )
 
         def clear_task(strategy, indexes):
@@ -598,6 +598,7 @@ class YuanrongStorageClient(TransferQueueStorageKVClient):
         self,
         items: list[Any],
         selector: Callable[[StorageStrategy, Any], bool],
+        failback: bool = False,
     ) -> dict[StorageStrategy, list[int]]:
         """Groups item indices by the first strategy that supports them.
 
@@ -610,6 +611,8 @@ class YuanrongStorageClient(TransferQueueStorageKVClient):
                    The order must correspond to the original keys.
             selector: A function that determines whether a strategy supports an item.
                      Signature: `(strategy: StorageStrategy, item: Any) -> bool`.
+            failback: If True, items that don't match any strategy will be ignored (not included in output).
+                      If False, a ValueError will be raised for any unmatched item.
 
         Returns:
             A dictionary mapping each active strategy to a list of indexes in `items`
@@ -622,10 +625,11 @@ class YuanrongStorageClient(TransferQueueStorageKVClient):
                     routed_indexes[strategy].append(i)
                     break
             else:
-                raise ValueError(
-                    f"No strategy supports item of type {type(item).__name__}: {item}. "
-                    f"Available strategies: {[type(s).__name__ for s in self._strategies]}"
-                )
+                if not failback:
+                    raise ValueError(
+                        f"No strategy supports item of type {type(item).__name__}: {item}. "
+                        f"Available strategies: {[type(s).__name__ for s in self._strategies]}"
+                    )
         return routed_indexes
 
     @staticmethod
