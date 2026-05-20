@@ -86,7 +86,7 @@ pip install torch-npu==2.8.0
 
 After installation, you can run TransferQueue with Yuanrong backend.
 
-Firstly, start ray cluster on localhost:
+First, start a local Ray cluster. Yuanrong backend relies on Ray for distributed management:
 ```bash
 ray start --head
 ```
@@ -106,23 +106,12 @@ conf = OmegaConf.create({"backend": {"storage_backend": "Yuanrong"}})
 # Initialize TransferQueue + Yuanrong
 tq.init(conf)
 
-# Get TransferQueue client
-client = tq.get_client()
-
-# Put data
+# Put data using kv_put
 data = TensorDict({"input": torch.randn(2, 10)}, batch_size=[2])
-batch_meta = client.put(data=data, partition_id="any_id")
+tq.kv_batch_put(keys=["sample_0", "sample_1"], partition_id="train", fields=data)
 
-# Get metadata before getting data
-meta = client.get_meta(
-    data_fields=list(data.keys()),
-    batch_size=data.size(0),
-    partition_id="any_id",
-    task_name="any_name",
-)
-
-# Get data
-result = client.get_data(meta)
+# Get data using kv_batch_get
+result = tq.kv_batch_get(keys=["sample_0", "sample_1"], partition_id="train")
 print("output:", result)
 
 # Cleanup
@@ -240,24 +229,16 @@ class DataActor:
         # Each process must call tq.init() to get a client
         tq.init(config)
         torch.npu.set_device(0)
-        self.client = tq.get_client()
     
     def put_data(self):
         """Put data on this node."""
         data = TensorDict({"input": torch.ones((3, 512), device="npu")}, batch_size=[3])
-        batch_meta = self.client.put(data=data, partition_id="train_0")
+        tq.kv_batch_put(keys=["s0", "s1", "s2"], partition_id="train", fields=data)
         print(f"[put] Data put completed")
-        return batch_meta
     
     def get_data(self):
         """Get data on this node."""
-        meta = self.client.get_meta(
-            data_fields=["input"],
-            batch_size=3,
-            partition_id="train_0",
-            task_name="generate_sequence",
-        )
-        result = self.client.get_data(meta)
+        result = tq.kv_batch_get(keys=["s0", "s1", "s2"], partition_id="train")
         print(f"[get] Data get completed: {result['input']}")
         return result
 
