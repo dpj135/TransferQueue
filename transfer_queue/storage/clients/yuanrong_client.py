@@ -351,7 +351,9 @@ class YuanrongStorageClient(StorageKVClient):
         if len(keys) != len(values):
             raise ValueError("Number of keys must match number of values")
 
-        routed_indexes = self._route_to_strategies(values, lambda strategy_, item_: strategy_.supports_put(item_))
+        routed_indexes = self._route_to_strategies(
+            values, lambda strategy_, item_: strategy_.supports_put(item_), item_label="value"
+        )
 
         # Define the 'put_task': Slicing the input list and calling the backend strategy.
         # The closure captures local 'keys' and 'values' for zero-overhead parameter passing.
@@ -394,7 +396,7 @@ class YuanrongStorageClient(StorageKVClient):
 
         strategy_tags = custom_backend_meta
         routed_indexes = self._route_to_strategies(
-            strategy_tags, lambda strategy_, item_: strategy_.supports_get(item_)
+            strategy_tags, lambda strategy_, item_: strategy_.supports_get(item_), item_label="backend_meta"
         )
 
         # Define the 'get_task': handles slicing of keys, shapes, and dtypes simultaneously.
@@ -426,7 +428,10 @@ class YuanrongStorageClient(StorageKVClient):
 
         strategy_tags = custom_backend_meta
         routed_indexes = self._route_to_strategies(
-            strategy_tags, lambda strategy_, item_: strategy_.supports_clear(item_), ignore_unmatched=True
+            strategy_tags,
+            lambda strategy_, item_: strategy_.supports_clear(item_),
+            ignore_unmatched=True,
+            item_label="backend_meta",
         )
 
         def clear_task(strategy, indexes):
@@ -439,7 +444,9 @@ class YuanrongStorageClient(StorageKVClient):
         self,
         items: list[Any],
         selector: Callable[[StorageStrategy, Any], bool],
+        *,
         ignore_unmatched: bool = False,
+        item_label: str = "value",
     ) -> dict[StorageStrategy, list[int]]:
         """Groups item indices by the first strategy that supports them.
 
@@ -454,6 +461,8 @@ class YuanrongStorageClient(StorageKVClient):
                      Signature: `(strategy: StorageStrategy, item: Any) -> bool`.
             ignore_unmatched: If True, items that don't match any strategy will be ignored (not included in output).
                               If False, a ValueError will be raised for any unmatched item.
+            item_label: Description of what `items` represents, used in error messages.
+                        "value" for put (user-provided data), "backend_meta" for get/clear (backend metadata).
 
         Returns:
             A dictionary mapping each active strategy to a list of indexes in `items`
@@ -470,10 +479,15 @@ class YuanrongStorageClient(StorageKVClient):
                 if ignore_unmatched:
                     unmatched_count += 1
                 else:
-                    raise ValueError(
-                        f"No strategy supports item of type {type(item).__name__}: {item}. "
-                        f"Available strategies: {[type(s).__name__ for s in self._strategies]}"
-                    )
+                    if item_label == "backend_meta":
+                        raise ValueError(
+                            "Cannot retrieve stored data because the backend that originally "
+                            "stored it is unavailable in the current process or node. Please "
+                            "check that the configuration and NPU resource availability are "
+                            "consistent across all processes and nodes."
+                        )
+                    else:
+                        raise ValueError(f"No strategy can handle {item_label} of type {type(item).__name__}.")
         if unmatched_count > 0:
             logger.warning(f"{unmatched_count} items were not matched to any strategy and will be ignored.")
 
