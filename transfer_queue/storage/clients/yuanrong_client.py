@@ -291,6 +291,11 @@ class GeneralKVClientAdapter(StorageStrategy):
         """
         buffers = self._ds_client.get_buffers(keys)
         valid_indexes = [i for i, buf in enumerate(buffers) if buf is not None]
+        if valid_indexes and len(valid_indexes) < len(keys):
+            logger.warning(
+                f"{len(keys) - len(valid_indexes)} requested keys were not found in openYuanrong-datasystem storage. "
+                f"Returned results will contain None for these keys."
+            )
         valid_bufs = [buffers[i] for i in valid_indexes]
         decoded_objs = batch_decode_from(valid_bufs)
         results = [None] * len(keys)
@@ -309,6 +314,9 @@ class YuanrongStorageClient(StorageKVClient):
     - NPU tensors via NPUTensorKVClientAdapter (for high performance).
     - General objects (CPU tensors, str, bool, list, etc.) via GeneralKVClientAdapter with serialization.
     """
+
+    ROUTE_ITEM_AS_VALUE = "value"
+    ROUTE_ITEM_AS_BACKEND_META = "backend_meta"
 
     def __init__(self, config: dict[str, Any]):
         if not YUANRONG_DATASYSTEM_IMPORTED:
@@ -331,7 +339,7 @@ class YuanrongStorageClient(StorageKVClient):
                 self._strategies.append(strategy)
 
         if not self._strategies:
-            raise RuntimeError("No storage strategy available for YuanrongStorageClient")
+            raise RuntimeError("No storage backend available for YuanrongStorageClient")
 
     def put(self, keys: list[str], values: list[Any]) -> list[str]:
         """Stores multiple key-value pairs to remote storage.
@@ -352,7 +360,7 @@ class YuanrongStorageClient(StorageKVClient):
             raise ValueError("Number of keys must match number of values")
 
         routed_indexes = self._route_to_strategies(
-            values, lambda strategy_, item_: strategy_.supports_put(item_), item_label="value"
+            values, lambda strategy_, item_: strategy_.supports_put(item_), item_label=self.ROUTE_ITEM_AS_VALUE
         )
 
         # Define the 'put_task': Slicing the input list and calling the backend strategy.
@@ -394,9 +402,17 @@ class YuanrongStorageClient(StorageKVClient):
         if not (len(keys) == len(shapes) == len(dtypes) == len(custom_backend_meta)):
             raise ValueError("Lengths of keys, shapes, dtypes, custom_backend_meta must match")
 
+        if any(not tag for tag in custom_backend_meta):
+            raise ValueError(
+                "Some keys have no backend metadata (empty string), indicating they "
+                "were not previously stored. Ensure all keys have been put before calling get."
+            )
+
         strategy_tags = custom_backend_meta
         routed_indexes = self._route_to_strategies(
-            strategy_tags, lambda strategy_, item_: strategy_.supports_get(item_), item_label="backend_meta"
+            strategy_tags,
+            lambda strategy_, item_: strategy_.supports_get(item_),
+            item_label=self.ROUTE_ITEM_AS_BACKEND_META,
         )
 
         # Define the 'get_task': handles slicing of keys, shapes, and dtypes simultaneously.
@@ -431,7 +447,7 @@ class YuanrongStorageClient(StorageKVClient):
             strategy_tags,
             lambda strategy_, item_: strategy_.supports_clear(item_),
             ignore_unmatched=True,
-            item_label="backend_meta",
+            item_label=self.ROUTE_ITEM_AS_BACKEND_META,
         )
 
         def clear_task(strategy, indexes):
@@ -446,7 +462,7 @@ class YuanrongStorageClient(StorageKVClient):
         selector: Callable[[StorageStrategy, Any], bool],
         *,
         ignore_unmatched: bool = False,
-        item_label: str = "value",
+        item_label: str,
     ) -> dict[StorageStrategy, list[int]]:
         """Groups item indices by the first strategy that supports them.
 
@@ -462,13 +478,15 @@ class YuanrongStorageClient(StorageKVClient):
             ignore_unmatched: If True, items that don't match any strategy will be ignored (not included in output).
                               If False, a ValueError will be raised for any unmatched item.
             item_label: Description of what `items` represents, used in error messages.
-                        "value" for put (user-provided data), "backend_meta" for get/clear (backend metadata).
+                        Use ROUTE_ITEM_AS_VALUE for put (user-provided data),
+                        or ROUTE_ITEM_AS_BACKEND_META for get/clear (backend metadata).
 
         Returns:
             A dictionary mapping each active strategy to a list of indexes in `items`
             that it should handle. Every index appears exactly once.
         """
         unmatched_count = 0
+        warning_count = 0
         routed_indexes: dict[StorageStrategy, list[int]] = {s: [] for s in self._strategies}
         for i, item in enumerate(items):
             for strategy in self._strategies:
@@ -477,9 +495,11 @@ class YuanrongStorageClient(StorageKVClient):
                     break
             else:
                 if ignore_unmatched:
+                    if item:  # non-empty item → real tag, backend likely unavailable
+                        warning_count += 1
                     unmatched_count += 1
                 else:
-                    if item_label == "backend_meta":
+                    if item_label == self.ROUTE_ITEM_AS_BACKEND_META:
                         raise ValueError(
                             "Cannot retrieve stored data because the backend that originally "
                             "stored it is unavailable in the current process or node. Please "
@@ -487,9 +507,19 @@ class YuanrongStorageClient(StorageKVClient):
                             "consistent across all processes and nodes."
                         )
                     else:
-                        raise ValueError(f"No strategy can handle {item_label} of type {type(item).__name__}.")
-        if unmatched_count > 0:
-            logger.warning(f"{unmatched_count} items were not matched to any strategy and will be ignored.")
+                        raise ValueError(f"No storage backend can handle {item_label} of type {type(item).__name__}.")
+        if warning_count > 0:
+            logger.warning(
+                f"{warning_count} stored items could not be processed because the backend "
+                f"that originally handled them may be unavailable in the current process or "
+                f"node. Please check that the configuration and NPU resource availability "
+                f"are consistent across all processes and nodes."
+            )
+        if unmatched_count > warning_count:
+            logger.debug(
+                f"{unmatched_count - warning_count} items with empty {item_label} "
+                f"will be silently skipped (likely not previously stored)."
+            )
 
         return routed_indexes
 

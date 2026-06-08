@@ -121,8 +121,8 @@ def start_datasystem_worker(
         env = os.environ.copy()
         if device_ids:
             # Ensure direct copy for specified devices
-            env["DS_D2H_MEMCPY_POLICY"] = "direct"
-            env["DS_H2D_MEMCPY_POLICY"] = "direct"
+            env.setdefault("DS_D2H_MEMCPY_POLICY", "direct")
+            env.setdefault("DS_H2D_MEMCPY_POLICY", "direct")
 
             env["ASCEND_RT_VISIBLE_DEVICES"] = device_ids
             logger.info(
